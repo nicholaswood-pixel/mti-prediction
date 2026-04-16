@@ -1,0 +1,9 @@
+{
+  "app": "python app.py",
+  "context": {
+    "project_name": "mti-score",
+    "github_owner": "nicholaswood-pixel",
+    "github_repo": "sample-mti",
+    "github_branch": "main"
+  }
+}

@@ -1,0 +1,25 @@
+version: 0.2
+
+phases:
+  install:
+    runtime-versions:
+      python: 3.11
+    commands:
+      - pip install --upgrade --force-reinstall . "awscli>1.20.30"
+      - |
+        if [ -n "$MLFLOW_TRACKING_URI" ] && [ -n "$MLFLOW_PYTHON_CLIENT_VERSION" ]; then
+          pip install --upgrade "mlflow==${MLFLOW_PYTHON_CLIENT_VERSION}" sagemaker-mlflow
+        fi
+  
+  build:
+    commands:
+      - export PYTHONUNBUFFERED=TRUE
+      - export PIPELINE_NAME="${PROJECT_NAME}-pipeline"
+      - export SAGEMAKER_EXEC_PIPELINE_ROLE_ARN="arn:aws:iam::799139197310:role/AmazonSageMakerServiceCatalogProductsExecutionRole"
+      - |
+        run-pipeline --module-name pipelines.mti_score.pipeline \
+          --role-arn $SAGEMAKER_PIPELINE_ROLE_ARN \
+          --tags "[]" \
+          --kwargs "{\"region\":\"${AWS_REGION}\",\"role\":\"${SAGEMAKER_EXEC_PIPELINE_ROLE_ARN}\",\"default_bucket\":\"${ARTIFACT_BUCKET}\",\"pipeline_name\":\"${PIPELINE_NAME}\",\"model_package_group_name\":\"${PIPELINE_NAME}\",\"base_job_prefix\":\"${PIPELINE_NAME}\"}"
+      - echo "Create/Update of the SageMaker Pipeline and execution completed."
+

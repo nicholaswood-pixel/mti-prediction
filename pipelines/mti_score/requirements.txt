@@ -1,0 +1,3 @@
+# Extra deps only — numpy/pandas/sklearn are pre-installed in the SageMaker sklearn image.
+# Pin LightGBM 3.3.x so pip does not upgrade the stack (e.g. NumPy 2) while resolving 4.x.
+lightgbm==3.3.5
