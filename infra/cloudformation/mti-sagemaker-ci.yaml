@@ -1,0 +1,207 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Custom CI for MTI SageMaker Pipelines: S3 artifact bucket, SageMaker execution role,
+  CodeBuild project cloning via AWS CodeConnections (formerly CodeStar Connections).
+  Deploy standalone or register as a Service Catalog product for a SageMaker Studio
+  custom project template.
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: mti-score-prediction
+    Description: Prefix for CodeBuild project name and default pipeline naming env vars.
+
+  RepositoryProvider:
+    Type: String
+    Default: GITHUB
+    AllowedValues:
+      - GITHUB
+      - GITLAB
+      - BITBUCKET
+      - GITHUB_ENTERPRISE
+    Description: >
+      CodeBuild source type; must match your repo host. Use with Auth type CODECONNECTIONS
+      and a connection created in the Developer Tools console.
+
+  RepositoryUrl:
+    Type: String
+    Description: >
+      HTTPS clone URL (e.g. https://github.com/org/mti-score-prediction). Must match the
+      provider linked to your CodeConnections connection.
+
+  BranchName:
+    Type: String
+    Default: main
+    Description: Git branch CodeBuild checks out.
+
+  CodeConnectionArn:
+    Type: String
+    Description: >
+      ARN of the connection. New connections use arn:aws:codeconnections:region:account:connection/id;
+      legacy ARNs use arn:aws:codestar-connections:... (both work with the IAM policy below).
+
+  BuildComputeType:
+    Type: String
+    Default: BUILD_GENERAL1_MEDIUM
+    AllowedValues:
+      - BUILD_GENERAL1_SMALL
+      - BUILD_GENERAL1_MEDIUM
+      - BUILD_GENERAL1_LARGE
+      - BUILD_GENERAL1_XLARGE
+      - BUILD_GENERAL1_2XLARGE
+
+Resources:
+  ArtifactBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      VersioningConfiguration:
+        Status: Enabled
+
+  SageMakerExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: sagemaker.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSageMakerFullAccess
+      Policies:
+        - PolicyName: ArtifactBucketAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:DeleteObject
+                  - s3:ListBucket
+                Resource:
+                  - !GetAtt ArtifactBucket.Arn
+                  - !Sub "${ArtifactBucket.Arn}/*"
+
+  CodeBuildServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codebuild.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: CodeBuildAndConnections
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:GetObjectVersion
+                  - s3:PutObject
+                Resource: !Sub "${ArtifactBucket.Arn}/*"
+              - Effect: Allow
+                Action:
+                  - s3:ListBucket
+                Resource: !GetAtt ArtifactBucket.Arn
+              # New prefix (July 2024+ console) and legacy codestar-connections ARNs
+              - Effect: Allow
+                Action:
+                  - codeconnections:UseConnection
+                  - codestar-connections:UseConnection
+                Resource: !Ref CodeConnectionArn
+              - Effect: Allow
+                Action:
+                  - sagemaker:CreatePipeline
+                  - sagemaker:UpdatePipeline
+                  - sagemaker:DeletePipeline
+                  - sagemaker:DescribePipeline
+                  - sagemaker:DescribePipelineDefinitionForExecution
+                  - sagemaker:DescribePipelineExecution
+                  - sagemaker:ListPipelineExecutions
+                  - sagemaker:ListPipelineExecutionSteps
+                  - sagemaker:StartPipelineExecution
+                  - sagemaker:StopPipelineExecution
+                  - sagemaker:ListPipelines
+                  - sagemaker:AddTags
+                  - sagemaker:ListTags
+                  - sagemaker:DescribeProject
+                Resource: "*"
+              - Effect: Allow
+                Action: iam:PassRole
+                Resource: !GetAtt SageMakerExecutionRole.Arn
+
+  CodeBuildProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Sub "${ProjectName}-pipeline-build"
+      ServiceRole: !GetAtt CodeBuildServiceRole.Arn
+      Artifacts:
+        Type: NO_ARTIFACTS
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: !Ref BuildComputeType
+        Image: aws/codebuild/amazonlinux2-x86_64-standard:5.0
+        PrivilegedMode: false
+        EnvironmentVariables:
+          - Name: ARTIFACT_BUCKET
+            Value: !Ref ArtifactBucket
+          - Name: SAGEMAKER_EXEC_PIPELINE_ROLE_ARN
+            Value: !GetAtt SageMakerExecutionRole.Arn
+          - Name: SAGEMAKER_PIPELINE_ROLE_ARN
+            Value: !GetAtt SageMakerExecutionRole.Arn
+          - Name: SAGEMAKER_PROJECT_NAME
+            Value: !Ref ProjectName
+          - Name: SAGEMAKER_PROJECT_ID
+            Value: custom-template
+      Source:
+        Type: !Ref RepositoryProvider
+        Location: !Ref RepositoryUrl
+        Auth:
+          Type: CODECONNECTIONS
+          Resource: !Ref CodeConnectionArn
+        GitCloneDepth: 1
+        BuildSpec: codebuild-buildspec.yml
+      SourceVersion: !Ref BranchName
+      TimeoutInMinutes: 120
+
+Outputs:
+  ArtifactBucketName:
+    Description: Use as default_bucket in pipeline kwargs (already set on CodeBuild project).
+    Value: !Ref ArtifactBucket
+    Export:
+      Name: !Sub "${AWS::StackName}-ArtifactBucket"
+
+  SageMakerExecutionRoleArn:
+    Description: Same role for pipeline upsert and SageMaker jobs (set on CodeBuild env).
+    Value: !GetAtt SageMakerExecutionRole.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-SageMakerExecutionRole"
+
+  CodeBuildProjectName:
+    Description: Run builds from console, CLI, EventBridge, or add CodePipeline on top.
+    Value: !Ref CodeBuildProject
+
+  CodeBuildServiceRoleArn:
+    Description: IAM role assumed by CodeBuild.
+    Value: !GetAtt CodeBuildServiceRole.Arn

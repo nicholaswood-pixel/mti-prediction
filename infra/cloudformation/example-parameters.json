@@ -1,0 +1,26 @@
+[
+  {
+    "ParameterKey": "ProjectName",
+    "ParameterValue": "mti-score-prediction"
+  },
+  {
+    "ParameterKey": "RepositoryProvider",
+    "ParameterValue": "GITHUB"
+  },
+  {
+    "ParameterKey": "RepositoryUrl",
+    "ParameterValue": "https://github.com/YOUR_ORG/mti-score-prediction"
+  },
+  {
+    "ParameterKey": "BranchName",
+    "ParameterValue": "main"
+  },
+  {
+    "ParameterKey": "CodeConnectionArn",
+    "ParameterValue": "arn:aws:codeconnections:us-east-1:123456789012:connection/xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+  },
+  {
+    "ParameterKey": "BuildComputeType",
+    "ParameterValue": "BUILD_GENERAL1_MEDIUM"
+  }
+]

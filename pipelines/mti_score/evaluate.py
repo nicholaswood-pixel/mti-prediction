@@ -6,7 +6,7 @@ import tarfile
 
 import numpy as np
 import pandas as pd
-from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+from sklearn.metrics import mean_squared_error
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -26,16 +26,10 @@ if __name__ == "__main__":
     if valid.empty:
         mse = float("nan")
         std = float("nan")
-        mae = float("nan")
-        rmse = float("nan")
-        r2 = float("nan")
         horizon_scores = []
     else:
         mse = mean_squared_error(valid["actual_mti"], valid["predicted_mti"])
         std = np.std(valid["actual_mti"] - valid["predicted_mti"])
-        mae = mean_absolute_error(valid["actual_mti"], valid["predicted_mti"])
-        rmse = float(np.sqrt(mse))
-        r2 = float(r2_score(valid["actual_mti"], valid["predicted_mti"]))
         horizon_scores = []
         for horizon, horizon_df in valid.groupby("horizon"):
             horizon_mse = mean_squared_error(horizon_df["actual_mti"], horizon_df["predicted_mti"])
@@ -53,11 +47,6 @@ if __name__ == "__main__":
                 "value": float(mse),
                 "standard_deviation": float(std),
             },
-            # For regression, "accuracy" is commonly represented using R^2.
-            # Keep the original MSE structure unchanged for existing thresholds.
-            "mae": float(mae),
-            "rmse": float(rmse),
-            "accuracy": float(r2),
             "horizons": horizon_scores,
         },
     }
