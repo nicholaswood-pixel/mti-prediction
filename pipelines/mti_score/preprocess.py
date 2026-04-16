@@ -3,6 +3,7 @@ import argparse
 import logging
 import os
 import pathlib
+import time
 
 import boto3
 import numpy as np
@@ -11,6 +12,17 @@ import pandas as pd
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 logger.addHandler(logging.StreamHandler())
+
+# Must match pipeline `InputDataUrl` default when sourcing from Athena (SageMaker disallows empty args).
+USE_ATHENA_INPUT_SENTINEL = "__USE_ATHENA__"
+
+
+def _use_s3_csv_input(raw: str) -> bool:
+    s = (raw or "").strip()
+    if not s or s == USE_ATHENA_INPUT_SENTINEL:
+        return False
+    return True
+
 
 FEATURES = [
     "mti_lag_1",
@@ -35,24 +47,107 @@ def parse_s3_uri(s3_uri):
     return bucket, key
 
 
+def load_from_athena(database: str, table: str, workgroup: str, output_s3: str) -> pd.DataFrame:
+    """Export Athena table to S3 via UNLOAD, then read as pandas DataFrame."""
+    athena = boto3.client("athena")
+    s3 = boto3.client("s3")
+
+    if not output_s3.endswith("/"):
+        output_s3 = output_s3 + "/"
+
+    query = (
+        f"UNLOAD (SELECT * FROM {database}.{table}) "
+        f"TO '{output_s3}' "
+        "WITH (format='TEXTFILE', field_delimiter=',', compression='GZIP', include_header=true)"
+    )
+
+    logger.info("Starting Athena UNLOAD for %s.%s", database, table)
+    resp = athena.start_query_execution(
+        QueryString=query,
+        QueryExecutionContext={"Database": database},
+        ResultConfiguration={"OutputLocation": output_s3},
+        WorkGroup=workgroup,
+    )
+    qid = resp["QueryExecutionId"]
+
+    while True:
+        qe = athena.get_query_execution(QueryExecutionId=qid)["QueryExecution"]
+        state = qe["Status"]["State"]
+        if state in {"SUCCEEDED", "FAILED", "CANCELLED"}:
+            break
+        time.sleep(5)
+
+    if state != "SUCCEEDED":
+        reason = qe["Status"].get("StateChangeReason", "unknown")
+        raise RuntimeError(f"Athena query failed ({state}): {reason}")
+
+    output_location = qe["ResultConfiguration"]["OutputLocation"]
+    bucket, prefix = parse_s3_uri(output_location)
+    logger.info("Athena UNLOAD output prefix: s3://%s/%s", bucket, prefix)
+
+    # UNLOAD writes one or more gz files under the prefix.
+    paginator = s3.get_paginator("list_objects_v2")
+    keys = []
+    for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
+        for obj in page.get("Contents", []):
+            key = obj["Key"]
+            if key.endswith(".gz"):
+                keys.append(key)
+    if not keys:
+        raise RuntimeError("Athena UNLOAD produced no .gz files.")
+
+    local_dir = "/opt/ml/processing/data/athena"
+    pathlib.Path(local_dir).mkdir(parents=True, exist_ok=True)
+    frames = []
+    for i, key in enumerate(sorted(keys)):
+        local_path = os.path.join(local_dir, f"part-{i}.csv.gz")
+        s3.download_file(bucket, key, local_path)
+        frames.append(pd.read_csv(local_path, compression="gzip", low_memory=False))
+        os.unlink(local_path)
+
+    return pd.concat(frames, ignore_index=True)
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--input-data", type=str, required=True)
+    parser.add_argument("--input-data", type=str, default="")
+    parser.add_argument("--athena-database", type=str, default=None)
+    parser.add_argument("--athena-table", type=str, default=None)
+    parser.add_argument("--athena-workgroup", type=str, default="primary")
+    parser.add_argument("--athena-output-s3", type=str, default=None)
     args = parser.parse_args()
 
     base_dir = "/opt/ml/processing"
     pathlib.Path(f"{base_dir}/data").mkdir(parents=True, exist_ok=True)
 
-    bucket, key = parse_s3_uri(args.input_data)
-    input_file = f"{base_dir}/data/mti_scores_history.csv"
+    if _use_s3_csv_input(args.input_data):
+        bucket, key = parse_s3_uri(args.input_data.strip())
+        input_file = f"{base_dir}/data/mti_scores_history.csv"
 
-    logger.info("Downloading data from bucket=%s key=%s", bucket, key)
-    s3 = boto3.resource("s3")
-    s3.Bucket(bucket).download_file(key, input_file)
+        logger.info("Downloading data from bucket=%s key=%s", bucket, key)
+        s3 = boto3.resource("s3")
+        s3.Bucket(bucket).download_file(key, input_file)
 
-    logger.info("Loading MTI data")
-    df = pd.read_csv(input_file, low_memory=False)
-    os.unlink(input_file)
+        logger.info("Loading MTI data from S3 CSV")
+        df = pd.read_csv(input_file, low_memory=False)
+        os.unlink(input_file)
+    else:
+        database = (args.athena_database or "").strip()
+        table = (args.athena_table or "").strip()
+        workgroup = (args.athena_workgroup or "").strip() or "primary"
+        output_s3 = (args.athena_output_s3 or "").strip()
+        if not (database and table and output_s3):
+            raise ValueError(
+                "Either provide --input-data (s3://...) or provide Athena args: "
+                "--athena-database, --athena-table, --athena-output-s3 (non-empty)."
+            )
+        logger.info("Loading MTI data from Athena table %s.%s", database, table)
+        df = load_from_athena(
+            database=database,
+            table=table,
+            workgroup=workgroup,
+            output_s3=output_s3,
+        )
 
     # Aligns with notebook: drop emissions score if missing/not present.
     df = df.drop(columns=["emissions_score"], errors="ignore")

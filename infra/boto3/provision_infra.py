@@ -28,11 +28,8 @@ class Config:
     sagemaker_pipeline_role_name: str
     codebuild_role_name: str
     codepipeline_role_name: str
-    mlflow_tracking_server_enabled: bool
-    mlflow_tracking_server_name: str
-    mlflow_tracking_server_role_name: str
-    mlflow_server_version: str
-    mlflow_tracking_server_size: str
+    mlflow_tracking_uri: Optional[str]
+    mlflow_python_client_version: str
     mlflow_experiment_name: str
     target_git_repo_dir: Optional[str]
     push_template_to_remote: bool
@@ -55,10 +52,6 @@ class Config:
     @property
     def codepipeline_name(self) -> str:
         return f"{self.project_name}-codepipeline"
-
-    @property
-    def mlflow_artifact_store_uri(self) -> str:
-        return f"s3://{self.artifact_bucket_name}/{self.project_name}/mlflow-artifacts/"
 
 
 def ensure_bucket(cfg: Config) -> None:
@@ -105,138 +98,10 @@ def get_role_arn(region: str, role_name: str) -> str:
     return iam.get_role(RoleName=role_name)["Role"]["Arn"]
 
 
-def _find_mlflow_tracking_server_arn(sm, name: str) -> Optional[str]:
-    list_fn = getattr(sm, "list_mlflow_tracking_servers", None)
-    if list_fn is None:
-        raise RuntimeError(
-            "Your boto3/botocore version is too old to call list_mlflow_tracking_servers. "
-            "Upgrade boto3 in the environment running provision_infra.py."
-        )
-    token = None
-    while True:
-        kwargs = {"MaxResults": 50}
-        if token:
-            kwargs["NextToken"] = token
-        resp = list_fn(**kwargs)
-        for summary in resp.get("TrackingServerSummaries", []):
-            if summary.get("TrackingServerName") == name:
-                return summary.get("TrackingServerArn")
-        token = resp.get("NextToken")
-        if not token:
-            return None
-
-
-def _wait_mlflow_tracking_server_ready(sm, name: str) -> str:
-    deadline = time.time() + 1800
-    last_status = None
-    describe_fn = getattr(sm, "describe_mlflow_tracking_server", None)
-    if describe_fn is None:
-        raise RuntimeError(
-            "Your boto3/botocore version is too old to call describe_mlflow_tracking_server. "
-            "Upgrade boto3 in the environment running provision_infra.py."
-        )
-    while time.time() < deadline:
-        desc = describe_fn(TrackingServerName=name)
-        status = desc.get("TrackingServerStatus")
-        active = desc.get("IsActive")
-        url = desc.get("TrackingServerUrl")
-        last_status = status
-        if status in {"CreateFailed", "UpdateFailed", "DeleteFailed", "StartFailed"}:
-            raise RuntimeError(f"MLflow tracking server is in terminal failure state: {status}")
-        # AWS returns Created/Started states; wait until active and URL is present.
-        if status in {"Created", "Updated", "Started"} and active == "Active" and url:
-            arn = desc.get("TrackingServerArn") or _find_mlflow_tracking_server_arn(sm, name)
-            if not arn:
-                raise RuntimeError("MLflow tracking server is active but ARN is missing.")
-            return arn
-        time.sleep(15)
-    raise TimeoutError(
-        f"Timed out waiting for MLflow tracking server '{name}' to become active "
-        f"(last status={last_status})"
-    )
-
-
-def ensure_mlflow_tracking_server(cfg: Config, mlflow_role_arn: str) -> Optional[str]:
-    """Create (or reuse) a SageMaker managed MLflow tracking server."""
-    if not cfg.mlflow_tracking_server_enabled:
-        print("MLflow tracking server disabled; skipping.")
-        return None
-
-    sm = boto3.client("sagemaker", region_name=cfg.region)
-    if getattr(sm, "create_mlflow_tracking_server", None) is None:
-        print(
-            "WARNING: boto3 SageMaker client does not support MLflow tracking server APIs; "
-            "skipping MLflow provisioning. Upgrade boto3 and rerun."
-        )
-        return None
-
-    existing_arn = _find_mlflow_tracking_server_arn(sm, cfg.mlflow_tracking_server_name)
-    if existing_arn:
-        print(f"MLflow tracking server already exists: {existing_arn}")
-        return _wait_mlflow_tracking_server_ready(sm, cfg.mlflow_tracking_server_name)
-
-    def _create_mlflow_for_version(mlflow_version: str):
-        create_kwargs = dict(
-            TrackingServerName=cfg.mlflow_tracking_server_name,
-            ArtifactStoreUri=cfg.mlflow_artifact_store_uri,
-            TrackingServerSize=cfg.mlflow_tracking_server_size,
-            MlflowVersion=mlflow_version,
-            RoleArn=mlflow_role_arn,
-            AutomaticModelRegistration=False,
-            Tags=[
-                {"Key": "project", "Value": cfg.project_name},
-                {"Key": "managed_by", "Value": "mlops-template-provision_infra"},
-            ],
-        )
-        try:
-            return sm.create_mlflow_tracking_server(**create_kwargs)
-        except ClientError as err:
-            code = (err.response.get("Error") or {}).get("Code", "")
-            message = str(err)
-            # Some organizations block resource tagging via SCPs; retry without Tags.
-            if code == "AccessDeniedException" or "tag" in message.lower():
-                create_kwargs.pop("Tags", None)
-                return sm.create_mlflow_tracking_server(**create_kwargs)
-            raise
-
-    preferred = cfg.mlflow_server_version
-    fallbacks = ["2.16.2", "2.13.2", "3.0.0", "3.4.0"]
-    candidates = [preferred] + [v for v in fallbacks if v != preferred]
-
-    last_err: Optional[Exception] = None
-    for mlflow_version in candidates:
-        print(
-            f"Creating MLflow tracking server '{cfg.mlflow_tracking_server_name}' "
-            f"(trying MlflowVersion={mlflow_version})"
-        )
-        try:
-            resp = _create_mlflow_for_version(mlflow_version)
-            cfg.mlflow_server_version = mlflow_version
-            print(f"MLflow tracking server create started: {resp.get('TrackingServerArn')}")
-            return _wait_mlflow_tracking_server_ready(sm, cfg.mlflow_tracking_server_name)
-        except ClientError as err:
-            last_err = err
-            code = (err.response.get("Error") or {}).get("Code", "")
-            message = str(err)
-            unsupported = (
-                code == "ValidationException"
-                and (
-                    "MLflow version is not supported" in message
-                    or "not supported" in message.lower()
-                )
-            )
-            if unsupported:
-                print(f"MlflowVersion {mlflow_version} not supported; trying next candidate...")
-                continue
-            raise
-    raise RuntimeError("Failed to create MLflow tracking server with any candidate version") from last_err
-
-
 def ensure_codebuild_project(
     cfg: Config,
     codebuild_role_arn: str,
     pipeline_role_arn: str,
-    mlflow_tracking_server_arn: Optional[str],
 ) -> None:
     cb = boto3.client("codebuild", region_name=cfg.region)
 
@@ -246,17 +111,24 @@ def ensure_codebuild_project(
         {"name": "SAGEMAKER_PIPELINE_ROLE_ARN", "value": pipeline_role_arn, "type": "PLAINTEXT"},
         {"name": "MLFLOW_EXPERIMENT_NAME", "value": cfg.mlflow_experiment_name, "type": "PLAINTEXT"},
     ]
-    if mlflow_tracking_server_arn:
+    if cfg.mlflow_tracking_uri:
         env_vars.extend(
             [
                 {
                     "name": "MLFLOW_TRACKING_URI",
-                    "value": mlflow_tracking_server_arn,
+                    "value": cfg.mlflow_tracking_uri,
                     "type": "PLAINTEXT",
                 },
-                {"name": "MLFLOW_PYTHON_CLIENT_VERSION", "value": cfg.mlflow_server_version, "type": "PLAINTEXT"},
+                {
+                    "name": "MLFLOW_PYTHON_CLIENT_VERSION",
+                    "value": cfg.mlflow_python_client_version,
+                    "type": "PLAINTEXT",
+                },
             ]
         )
+        print("CodeBuild will use existing MLflow tracking URI from MLFLOW_TRACKING_URI.")
+    else:
+        print("MLFLOW_TRACKING_URI not set; CodeBuild runs will not log to MLflow.")
 
     project_def = {
         "name": cfg.codebuild_project_name,
@@ -448,16 +320,11 @@ def load_config_from_env() -> Config:
         codepipeline_role_name=os.getenv(
             "CODEPIPELINE_ROLE_NAME", "AmazonSageMakerServiceCatalogProductsCodePipelineRole"
         ),
-        mlflow_tracking_server_enabled=os.getenv("ENABLE_MLFLOW_TRACKING_SERVER", "true").lower()
-        == "true",
-        mlflow_tracking_server_name=os.getenv(
-            "MLFLOW_TRACKING_SERVER_NAME", f"{project_name}-mlflow"
+        mlflow_tracking_uri=(
+            (os.getenv("MLFLOW_TRACKING_URI") or "").strip() or None
         ),
-        mlflow_tracking_server_role_name=os.getenv(
-            "MLFLOW_TRACKING_SERVER_ROLE_NAME", sagemaker_pipeline_role_name
-        ),
-        mlflow_server_version=os.getenv("MLFLOW_SERVER_VERSION", "2.16.2"),
-        mlflow_tracking_server_size=os.getenv("MLFLOW_TRACKING_SERVER_SIZE", "Small"),
+        mlflow_python_client_version=os.getenv("MLFLOW_PYTHON_CLIENT_VERSION", "2.16.2").strip()
+        or "2.16.2",
         mlflow_experiment_name=os.getenv("MLFLOW_EXPERIMENT_NAME", f"{project_name}-experiments"),
         target_git_repo_dir=os.getenv("TARGET_GIT_REPO_DIR"),
         push_template_to_remote=os.getenv("PUSH_TEMPLATE_TO_REMOTE", "true").lower() == "true",
@@ -581,21 +448,15 @@ def main() -> None:
 
     ensure_bucket(cfg)
     pipeline_role_arn = ensure_existing_role(cfg.region, cfg.sagemaker_pipeline_role_name)
-    mlflow_tracking_server_arn: Optional[str] = None
-    if cfg.mlflow_tracking_server_enabled:
-        mlflow_role_arn = ensure_existing_role(cfg.region, cfg.mlflow_tracking_server_role_name)
-        mlflow_tracking_server_arn = ensure_mlflow_tracking_server(cfg, mlflow_role_arn)
     codebuild_role_arn = ensure_existing_role(cfg.region, cfg.codebuild_role_name)
     codepipeline_role_arn = ensure_existing_role(cfg.region, cfg.codepipeline_role_name)
     # Resolve role fresh from IAM so CodeBuild uses the exact current role ARN.
     codebuild_role_arn = get_role_arn(cfg.region, cfg.codebuild_role_name)
-    ensure_codebuild_project(cfg, codebuild_role_arn, pipeline_role_arn, mlflow_tracking_server_arn)
+    ensure_codebuild_project(cfg, codebuild_role_arn, pipeline_role_arn)
     ensure_codepipeline(cfg, codepipeline_role_arn, cfg.codebuild_project_name)
     print("Provisioning complete.")
     print(f"artifact_bucket={cfg.artifact_bucket_name}")
     print(f"pipeline_role_arn={pipeline_role_arn}")
-    if mlflow_tracking_server_arn:
-        print(f"mlflow_tracking_server_arn={mlflow_tracking_server_arn}")
     print(f"codebuild_project={cfg.codebuild_project_name}")
     print(f"codepipeline_name={cfg.codepipeline_name}")
 

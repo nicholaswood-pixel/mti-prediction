@@ -6,22 +6,20 @@ phases:
       python: 3.11
     commands:
       - pip install --upgrade --force-reinstall . "awscli>1.20.30"
+      - |
+        if [ -n "$MLFLOW_TRACKING_URI" ] && [ -n "$MLFLOW_PYTHON_CLIENT_VERSION" ]; then
+          pip install --upgrade "mlflow==${MLFLOW_PYTHON_CLIENT_VERSION}" sagemaker-mlflow
+        fi
   
   build:
     commands:
       - export PYTHONUNBUFFERED=TRUE
-      # Infra: set via CodeBuild env (see infra/cloudformation/mti-sagemaker-ci.yaml) or SageMaker Studio project.
-      - export SAGEMAKER_PROJECT_NAME="${SAGEMAKER_PROJECT_NAME:-mti-score-prediction}"
-      - export SAGEMAKER_PROJECT_ID="${SAGEMAKER_PROJECT_ID:-custom}"
-      - export SAGEMAKER_PROJECT_NAME_ID="${SAGEMAKER_PROJECT_NAME}-${SAGEMAKER_PROJECT_ID}"
-      - export SAGEMAKER_PIPELINE_ROLE_ARN="${SAGEMAKER_PIPELINE_ROLE_ARN:?Set SAGEMAKER_PIPELINE_ROLE_ARN on the CodeBuild project}"
-      # Job role for processing/training; defaults to pipeline role (custom CFN uses one role for both).
-      - export SAGEMAKER_EXEC_PIPELINE_ROLE_ARN="${SAGEMAKER_EXEC_PIPELINE_ROLE_ARN:-$SAGEMAKER_PIPELINE_ROLE_ARN}"
-      - export ARTIFACT_BUCKET="${ARTIFACT_BUCKET:?Set ARTIFACT_BUCKET on the CodeBuild project}"
+      - export PIPELINE_NAME="${PROJECT_NAME}-pipeline"
+      - export SAGEMAKER_EXEC_PIPELINE_ROLE_ARN="arn:aws:iam::799139197310:role/AmazonSageMakerServiceCatalogProductsExecutionRole"
       - |
         run-pipeline --module-name pipelines.mti_score.pipeline \
           --role-arn $SAGEMAKER_PIPELINE_ROLE_ARN \
-          --tags "[{\"Key\":\"sagemaker:project-name\", \"Value\":\"${SAGEMAKER_PROJECT_NAME}\"}, {\"Key\":\"sagemaker:project-id\", \"Value\":\"${SAGEMAKER_PROJECT_ID}\"}]" \
-          --kwargs "{\"region\":\"${AWS_REGION}\",\"role\":\"${SAGEMAKER_EXEC_PIPELINE_ROLE_ARN}\",\"default_bucket\":\"${ARTIFACT_BUCKET}\",\"pipeline_name\":\"${SAGEMAKER_PROJECT_NAME_ID}\",\"model_package_group_name\":\"${SAGEMAKER_PROJECT_NAME_ID}\",\"base_job_prefix\":\"${SAGEMAKER_PROJECT_NAME_ID}\",\"sagemaker_project_name\":\"${SAGEMAKER_PROJECT_NAME}\"}"
+          --tags "[]" \
+          --kwargs "{\"region\":\"${AWS_REGION}\",\"role\":\"${SAGEMAKER_EXEC_PIPELINE_ROLE_ARN}\",\"default_bucket\":\"${ARTIFACT_BUCKET}\",\"pipeline_name\":\"${PIPELINE_NAME}\",\"model_package_group_name\":\"${PIPELINE_NAME}\",\"base_job_prefix\":\"${PIPELINE_NAME}\"}"
       - echo "Create/Update of the SageMaker Pipeline and execution completed."
 

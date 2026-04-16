@@ -12,7 +12,7 @@ from sagemaker.sklearn.estimator import SKLearn
 from sagemaker.sklearn.processing import SKLearnProcessor
 from sagemaker.workflow.condition_step import ConditionStep
 from sagemaker.workflow.conditions import ConditionLessThanOrEqualTo
-from sagemaker.workflow.functions import JsonGet
+from sagemaker.workflow.functions import Join, JsonGet
 from sagemaker.workflow.model_step import ModelStep
 from sagemaker.workflow.parameters import ParameterFloat, ParameterInteger, ParameterString
 from sagemaker.workflow.pipeline import Pipeline
@@ -70,7 +70,7 @@ def get_pipeline_custom_tags(new_tags, region, sagemaker_project_name=None):
 def get_pipeline(
     region,
     sagemaker_project_name=None,
-    role="arn:aws:iam::799139197310:role/AmazonSageMakerServiceCatalogProductsExecutionRole",
+    role=None,
     default_bucket=None,
     model_package_group_name="MTIScorePredictionPackageGroup",
     pipeline_name="MTIScorePredictionPipeline",
@@ -92,9 +92,18 @@ def get_pipeline(
         name="ModelApprovalStatus", default_value="PendingManualApproval"
     )
     mse_threshold = ParameterFloat(name="MseThreshold", default_value=0.05)
-    input_data = ParameterString(
-        name="InputDataUrl",
-        default_value=f"s3://sagemaker-project-p-6zrwk4lncvw3/mti_scores_history.csv",
+    # Legacy S3 CSV input. SageMaker rejects empty container arguments; use a sentinel to mean
+    # "skip S3 and load from Athena" (see preprocess.py).
+    input_data = ParameterString(name="InputDataUrl", default_value="__USE_ATHENA__")
+
+    athena_database = ParameterString(
+        name="AthenaDatabase", default_value="ps-prod-maritime_transparency_index"
+    )
+    athena_table = ParameterString(name="AthenaTable", default_value="mti_scores")
+    athena_workgroup = ParameterString(name="AthenaWorkGroup", default_value="primary")
+    athena_output_s3 = ParameterString(
+        name="AthenaOutputS3",
+        default_value=f"s3://elz-s3-ai-dev-maritime-transparency-index/",
     )
 
     sklearn_processor = SKLearnProcessor(
@@ -110,7 +119,18 @@ def get_pipeline(
             ProcessingOutput(output_name="prepared", source="/opt/ml/processing/prepared"),
         ],
         code=os.path.join(BASE_DIR, "preprocess.py"),
-        arguments=["--input-data", input_data],
+        arguments=[
+            "--input-data",
+            input_data,
+            "--athena-database",
+            athena_database,
+            "--athena-table",
+            athena_table,
+            "--athena-workgroup",
+            athena_workgroup,
+            "--athena-output-s3",
+            athena_output_s3,
+        ],
     )
     step_process = ProcessingStep(name="PreprocessMTIData", step_args=preprocess_step_args)
 
@@ -201,6 +221,59 @@ def get_pipeline(
         model_package_group_name=model_package_group_name,
         approval_status=model_approval_status,
         model_metrics=model_metrics,
+        # Model package versions cannot be tagged; use customer metadata instead.
+        customer_metadata_properties={
+            "eval_mse": Join(
+                on="",
+                values=[
+                    JsonGet(
+                        step_name=step_eval.name,
+                        property_file=evaluation_report,
+                        json_path="regression_metrics.mse.value",
+                    )
+                ],
+            ),
+            "eval_mse_std": Join(
+                on="",
+                values=[
+                    JsonGet(
+                        step_name=step_eval.name,
+                        property_file=evaluation_report,
+                        json_path="regression_metrics.mse.standard_deviation",
+                    )
+                ],
+            ),
+            "eval_mae": Join(
+                on="",
+                values=[
+                    JsonGet(
+                        step_name=step_eval.name,
+                        property_file=evaluation_report,
+                        json_path="regression_metrics.mae",
+                    )
+                ],
+            ),
+            "eval_rmse": Join(
+                on="",
+                values=[
+                    JsonGet(
+                        step_name=step_eval.name,
+                        property_file=evaluation_report,
+                        json_path="regression_metrics.rmse",
+                    )
+                ],
+            ),
+            "eval_accuracy_r2": Join(
+                on="",
+                values=[
+                    JsonGet(
+                        step_name=step_eval.name,
+                        property_file=evaluation_report,
+                        json_path="regression_metrics.accuracy",
+                    )
+                ],
+            ),
+        },
     )
     step_register = ModelStep(name="RegisterMTIScoreModel", step_args=register_step_args)
 
@@ -226,6 +299,10 @@ def get_pipeline(
             model_approval_status,
             mse_threshold,
             input_data,
+            athena_database,
+            athena_table,
+            athena_workgroup,
+            athena_output_s3,
         ],
         steps=[step_process, step_train, step_eval, step_cond],
         sagemaker_session=pipeline_session,

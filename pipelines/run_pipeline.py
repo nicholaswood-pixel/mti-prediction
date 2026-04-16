@@ -15,10 +15,37 @@ from __future__ import absolute_import
 
 import argparse
 import json
+import os
 import sys
 import traceback
 
 from pipelines._utils import get_pipeline_driver, convert_struct, get_pipeline_custom_tags
+
+
+def _maybe_log_mlflow_summary(execution, kwargs: dict) -> None:
+    """Log a lightweight summary run to SageMaker managed MLflow (Studio) if configured."""
+    tracking_uri = os.getenv("MLFLOW_TRACKING_URI")
+    if not tracking_uri:
+        return
+
+    try:
+        import mlflow  # type: ignore
+    except ImportError:
+        print("MLFLOW_TRACKING_URI is set but mlflow is not installed; skipping MLflow logging.")
+        return
+
+    experiment = os.getenv("MLFLOW_EXPERIMENT_NAME") or kwargs.get("pipeline_name") or "default"
+    try:
+        mlflow.set_tracking_uri(tracking_uri)
+        mlflow.set_experiment(experiment)
+        with mlflow.start_run(run_name="sagemaker-pipeline-execution"):
+            mlflow.log_param("pipeline_execution_arn", execution.arn)
+            mlflow.log_param("region", kwargs.get("region", ""))
+            mlflow.log_param("pipeline_name", kwargs.get("pipeline_name", ""))
+            mlflow.log_param("model_package_group_name", kwargs.get("model_package_group_name", ""))
+        print(f"MLflow summary logged to experiment '{experiment}'.")
+    except Exception as err:  # pragma: no cover
+        print(f"MLflow logging skipped due to error: {err}")
 
 
 def main():  # pragma: no cover
@@ -72,6 +99,8 @@ def main():  # pragma: no cover
         parser.print_help()
         sys.exit(2)
     tags = convert_struct(args.tags)
+    if not isinstance(tags, list):
+        tags = []
 
     try:
         pipeline = get_pipeline_driver(args.module_name, args.kwargs)
@@ -100,6 +129,8 @@ def main():  # pragma: no cover
         print("\n#####Execution completed. Execution step details:")
 
         print(execution.list_steps())
+        kwargs_dict = convert_struct(args.kwargs)
+        _maybe_log_mlflow_summary(execution, kwargs_dict)
         # Todo print the status?
     except Exception as e:  # pylint: disable=W0703
         print(f"Exception: {e}")

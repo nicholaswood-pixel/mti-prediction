@@ -45,7 +45,10 @@ def get_pipeline_custom_tags(module_name, args, tags):
     try:
         _imports = __import__(module_name, fromlist=["get_pipeline_custom_tags"])
         kwargs = convert_struct(args)
-        return _imports.get_pipeline_custom_tags(tags, kwargs['region'], kwargs['sagemaker_project_name'])
+        sagemaker_project_name = kwargs.get("sagemaker_project_name")
+        if not sagemaker_project_name:
+            return tags
+        return _imports.get_pipeline_custom_tags(tags, kwargs["region"], sagemaker_project_name)
     except Exception as e:
         print(f"Error getting project tags: {e}")
     return tags
