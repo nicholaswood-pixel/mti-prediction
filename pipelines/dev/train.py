@@ -2,18 +2,32 @@
 import argparse
 import logging
 import os
+import re
 from contextlib import nullcontext
 
 import joblib
+import sklearn
 from sklearn.linear_model import SGDClassifier
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 logger.addHandler(logging.StreamHandler())
 
+
+def _default_sgd_loss() -> str:
+    """``log_loss`` is valid for SGDClassifier from sklearn 1.1+; older releases use ``log``."""
+    m = re.match(r"(\d+)\.(\d+)", sklearn.__version__)
+    if not m:
+        return "log"
+    major, minor = int(m.group(1)), int(m.group(2))
+    if major > 1 or (major == 1 and minor >= 1):
+        return "log_loss"
+    return "log"
+
+
 # SGD defaults (kept in sync with train_digit_classifier for MLflow param logging)
 _DEFAULT_RANDOM_STATE = 42
-_DEFAULT_LOSS = "log_loss"
+_DEFAULT_LOSS = _default_sgd_loss()
 _DEFAULT_TOL = 1e-3
 _DEFAULT_ALPHA = 1e-4
 
@@ -38,7 +52,8 @@ def _mlflow_run_context(mlflow_tracking_uri: str, experiment_name: str):
     import mlflow
 
     mlflow.set_tracking_uri(mlflow_tracking_uri.strip())
-    mlflow.set_experiment(experiment_name.strip() or "dev-digit-training")
+    exp = (experiment_name or "").strip()
+    mlflow.set_experiment(exp)
     run_name = os.environ.get("SM_TRAINING_JOB_NAME") or None
     return mlflow.start_run(run_name=run_name)
 
@@ -49,14 +64,16 @@ if __name__ == "__main__":
     parser.add_argument("--model-dir", type=str, default=os.environ.get("SM_MODEL_DIR"))
     parser.add_argument("--max-iter", type=int, default=100)
     parser.add_argument(
+        "--mlflow-tracking-uri",
         "--mlflow_tracking_uri",
         type=str,
-        default=os.environ.get("MLFLOW_TRACKING_URI", ""),
+        default="",
     )
     parser.add_argument(
+        "--mlflow-experiment-name",
         "--mlflow_experiment_name",
         type=str,
-        default=os.environ.get("MLFLOW_EXPERIMENT_NAME", "dev-digit-training"),
+        default="",
     )
     args = parser.parse_args()
 
