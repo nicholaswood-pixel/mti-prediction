@@ -92,13 +92,14 @@ def get_pipeline(
         name="AccuracyThreshold",
         default_value=0.85,
     )
-    max_train_samples = ParameterInteger(
+    # String parameters: ProcessingJob container "arguments" must be strings; Integer refs fail CreatePipeline.
+    max_train_samples = ParameterString(
         name="MaxTrainSamples",
-        default_value=12_000,
+        default_value="12000",
     )
-    max_test_samples = ParameterInteger(
+    max_test_samples = ParameterString(
         name="MaxTestSamples",
-        default_value=3_000,
+        default_value="3000",
     )
     mlflow_tracking_uri = ParameterString(
         name="MlflowTrackingUri",

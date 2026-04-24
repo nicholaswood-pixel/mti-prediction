@@ -35,7 +35,7 @@ Defined in `pipelines/dev/pipeline.py`:
 ## Parameters (defaults are template-friendly)
 
 - `AccuracyThreshold` — minimum test accuracy to allow registration (default `0.85`).
-- `MaxTrainSamples` / `MaxTestSamples` — subsample after split for faster/cheaper runs (defaults `12000` / `3000`; set large values or adjust `preprocess.py` to use full MNIST).
+- `MaxTrainSamples` / `MaxTestSamples` — subsample after split for faster/cheaper runs (defaults `"12000"` / `"3000"` as **strings**; required by SageMaker for processing container arguments). Override with numeric strings, e.g. `"50000"`.
 
 ## Local development
 
