@@ -49,12 +49,12 @@ if __name__ == "__main__":
     parser.add_argument("--model-dir", type=str, default=os.environ.get("SM_MODEL_DIR"))
     parser.add_argument("--max-iter", type=int, default=100)
     parser.add_argument(
-        "--mlflow-tracking-uri",
+        "--mlflow_tracking_uri",
         type=str,
         default=os.environ.get("MLFLOW_TRACKING_URI", ""),
     )
     parser.add_argument(
-        "--mlflow-experiment-name",
+        "--mlflow_experiment_name",
         type=str,
         default=os.environ.get("MLFLOW_EXPERIMENT_NAME", "dev-digit-training"),
     )
