@@ -1,0 +1,22 @@
+version: 0.2
+
+phases:
+  install:
+    runtime-versions:
+      python: 3.11
+    commands:
+      - pip install --upgrade pip
+      - pip install --upgrade . "awscli>1.20.30"
+  
+  build:
+    commands:
+      - export PYTHONUNBUFFERED=TRUE
+      - export PIPELINE_NAME="${GITHUB_REPO}-pipeline"
+      - export SAGEMAKER_EXEC_PIPELINE_ROLE_ARN="${SAGEMAKER_EXEC_PIPELINE_ROLE_ARN:-$SAGEMAKER_PIPELINE_ROLE_ARN}"
+      - |
+        run-pipeline --module-name pipelines.dev.pipeline \
+          --role-arn $SAGEMAKER_PIPELINE_ROLE_ARN \
+          --tags "[]" \
+          --kwargs "{\"region\":\"${AWS_REGION}\",\"role\":\"${SAGEMAKER_EXEC_PIPELINE_ROLE_ARN}\",\"default_bucket\":\"${ARTIFACT_BUCKET}\",\"pipeline_name\":\"${PIPELINE_NAME}\",\"model_package_group_name\":\"${PIPELINE_NAME}\",\"base_job_prefix\":\"${PIPELINE_NAME}\"}"
+      - echo "Create/Update of the SageMaker Pipeline and execution completed."
+

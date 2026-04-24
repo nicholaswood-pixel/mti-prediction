@@ -1,0 +1,3 @@
+# Add pip packages for your custom training code here (e.g. torch, xgboost).
+# The SageMaker sklearn image already includes numpy, pandas, scikit-learn, and joblib.
+mlflow>=2.10,<3
