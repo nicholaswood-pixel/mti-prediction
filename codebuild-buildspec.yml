@@ -11,7 +11,7 @@ phases:
   build:
     commands:
       - export PYTHONUNBUFFERED=TRUE
-      - export PIPELINE_NAME="${GITHUB_REPO}-pipeline"
+      - export PIPELINE_NAME="${PROJECT_NAME}-pipeline"
       - export SAGEMAKER_EXEC_PIPELINE_ROLE_ARN="${SAGEMAKER_EXEC_PIPELINE_ROLE_ARN:-$SAGEMAKER_PIPELINE_ROLE_ARN}"
       - |
         run-pipeline --module-name pipelines.dev.pipeline \
