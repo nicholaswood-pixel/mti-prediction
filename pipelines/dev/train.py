@@ -52,8 +52,7 @@ def _mlflow_run_context(mlflow_tracking_uri: str, experiment_name: str):
     import mlflow
 
     mlflow.set_tracking_uri(mlflow_tracking_uri.strip())
-    exp = (experiment_name or "").strip()
-    mlflow.set_experiment(exp)
+    mlflow.set_experiment((experiment_name or "").strip() or "dev-digit-training")
     run_name = os.environ.get("SM_TRAINING_JOB_NAME") or None
     return mlflow.start_run(run_name=run_name)
 
